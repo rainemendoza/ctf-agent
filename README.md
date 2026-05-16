@@ -68,14 +68,26 @@ cp .env.example .env
 # Edit .env with your API keys and CTFd token
 
 # Run against a CTFd instance
-uv run ctf-solve \
-  --ctfd-url https://ctf.example.com \
-  --ctfd-token ctfd_your_token \
+uv run ctf-solve --coordinator codex \
+  --ctfd-url https://demo.ctfd.io/ \
+  --ctfd-token ctfd_38cbe8bf1adf9449d4d016f5f11b6d96c7905ed1f40bec6ccd1b0fc746fcf9f9   \
   --challenges-dir challenges \
-  --max-challenges 10 \
+  --max-challenges 3 \
   -v
 ```
 
+uv run ctf-solve --coordinator codex \
+  --challenges-dir challenges \
+  --max-challenges 3 \
+  -v
+
+This one had success
+uv run ctf-solve \
+    --coordinator codex \
+    --models codex/gpt-5.4-mini \
+    --challenges-dir challenges \
+    --max-challenges 2 \
+    -v
 ## Coordinator Backends
 
 ```bash

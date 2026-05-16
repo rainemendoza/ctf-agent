@@ -15,7 +15,6 @@ from pydantic_ai.toolsets.abstract import ToolsetTool
 from pydantic_ai.toolsets.wrapper import WrapperToolset
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.deps import SolverDeps
 from backend.loop_detect import LOOP_WARNING_MESSAGE, LoopDetector
 from backend.models import (
@@ -26,6 +25,7 @@ from backend.models import (
     supports_vision,
 )
 from backend.output_types import FlagFound
+from backend.platform import PlatformClient
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, CORRECT_MARKERS, ERROR, FLAG_FOUND, GAVE_UP, SolverResult
@@ -111,7 +111,7 @@ class Solver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
+        ctfd: PlatformClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
@@ -244,10 +244,10 @@ class Solver:
             if isinstance(output, FlagFound):
                 self._flag = output.flag
                 self._findings = f"Flag found via {output.method}: {output.flag}"
-                # In dry-run mode, structured output is sufficient (can't verify via CTFd)
+                # In dry-run mode, structured output is sufficient (can't verify remotely).
                 if self.deps.no_submit:
                     self._confirmed = True
-            # CTFd confirmation always counts (the primary path when not in dry-run)
+            # Remote platform confirmation always counts (the primary path when not in dry-run).
             if self.deps.confirmed_flag:
                 self._confirmed = True
                 self._flag = self._flag or self.deps.confirmed_flag

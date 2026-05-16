@@ -17,12 +17,17 @@ from claude_agent_sdk import (
 from backend.agents.coordinator_core import (
     do_broadcast,
     do_bump_agent,
+    do_defer_challenge,
     do_check_swarm_status,
+    do_get_budget_status,
+    do_get_strategy_plan,
     do_fetch_challenges,
     do_get_solve_status,
     do_kill_swarm,
+    do_promote_challenge,
     do_read_solver_trace,
     do_spawn_swarm,
+    do_set_strategy_mode,
     do_submit_flag,
 )
 from backend.agents.coordinator_loop import build_deps, run_event_loop
@@ -36,19 +41,19 @@ You are a CTF competition coordinator running for the ENTIRE duration of a live 
 Your job is to maximize the number of challenges solved.
 
 Strategy:
-- Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Use the strategy queue as the source of truth for what to spawn next.
+- Spawn swarms for unsolved challenges in ranked order, using solve count, value,
+    category, keywords, and recent progress signals.
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
 
 CRITICAL RULES:
-- NEVER kill a swarm. Solvers will keep trying indefinitely with different approaches.
-  Even when stuck, they often unstick themselves after several bumps. Your job is to
-  HELP them, not give up on them. The only time a swarm should die is when the flag
-  is confirmed correct.
+- Stop or defer swarms that exceed configured wall-time, no-progress, wrong-submission,
+    or cost limits.
+- Prefer easy/high-confidence solves first unless strategy_mode says otherwise.
 - When a solver seems stuck, bump it with very specific technical guidance based on
   its trace. Tell it exactly what to try next — specific tools, techniques, approaches.
-- Cost is not a concern. Keep all swarms running.
 
 You will receive event messages. Respond with tool calls to manage the competition.
 """
@@ -70,15 +75,35 @@ def _build_coordinator_mcp(deps: CoordinatorDeps):
     async def get_solve_status(args: dict) -> dict:
         return _text(await do_get_solve_status(deps))
 
-    @tool("spawn_swarm", "Launch all solver models on a challenge.", {"challenge_name": str})
+    @tool("get_strategy_plan", "Show the ranked challenge queue with scoring reasons.", {})
+    async def get_strategy_plan(args: dict) -> dict:
+        return _text(await do_get_strategy_plan(deps))
+
+    @tool("get_budget_status", "Show per-challenge progress, cost, and stop-policy state.", {})
+    async def get_budget_status(args: dict) -> dict:
+        return _text(await do_get_budget_status(deps))
+
+    @tool("spawn_swarm", "Launch solver models on a challenge using the current strategy tier.", {"challenge_name": str})
     async def spawn_swarm(args: dict) -> dict:
         return _text(await do_spawn_swarm(deps, args["challenge_name"]))
+
+    @tool("defer_challenge", "Pause a challenge with a reason and retry window.", {"challenge_name": str, "reason": str})
+    async def defer_challenge(args: dict) -> dict:
+        return _text(await do_defer_challenge(deps, args["challenge_name"], args["reason"]))
+
+    @tool("promote_challenge", "Boost the priority of a challenge.", {"challenge_name": str, "bonus": float})
+    async def promote_challenge(args: dict) -> dict:
+        return _text(await do_promote_challenge(deps, args["challenge_name"], args.get("bonus", 25.0)))
+
+    @tool("set_strategy_mode", "Switch the coordinator strategy mode.", {"strategy_mode": str})
+    async def set_strategy_mode(args: dict) -> dict:
+        return _text(await do_set_strategy_mode(deps, args["strategy_mode"]))
 
     @tool("check_swarm_status", "Get per-agent progress for a swarm.", {"challenge_name": str})
     async def check_swarm_status(args: dict) -> dict:
         return _text(await do_check_swarm_status(deps, args["challenge_name"]))
 
-    @tool("submit_flag", "Submit a flag to CTFd.", {"challenge_name": str, "flag": str})
+    @tool("submit_flag", "Submit a flag to the configured CTF platform.", {"challenge_name": str, "flag": str})
     async def submit_flag(args: dict) -> dict:
         return _text(await do_submit_flag(deps, args["challenge_name"], args["flag"]))
 
@@ -100,8 +125,22 @@ def _build_coordinator_mcp(deps: CoordinatorDeps):
 
     return create_sdk_mcp_server(
         name="coordinator", version="1.0.0",
-        tools=[fetch_challenges, get_solve_status, spawn_swarm, check_swarm_status,
-               submit_flag, kill_swarm, bump_agent, broadcast, read_solver_trace],
+        tools=[
+            fetch_challenges,
+            get_solve_status,
+            get_strategy_plan,
+            get_budget_status,
+            spawn_swarm,
+            defer_challenge,
+            promote_challenge,
+            set_strategy_mode,
+            check_swarm_status,
+            submit_flag,
+            kill_swarm,
+            bump_agent,
+            broadcast,
+            read_solver_trace,
+        ],
     )
 
 
@@ -124,9 +163,12 @@ async def run_claude_coordinator(
 
     allowed = {
         "mcp__coordinator__fetch_challenges", "mcp__coordinator__get_solve_status",
-        "mcp__coordinator__spawn_swarm", "mcp__coordinator__check_swarm_status",
-        "mcp__coordinator__submit_flag", "mcp__coordinator__kill_swarm",
-        "mcp__coordinator__bump_agent", "mcp__coordinator__broadcast",
+        "mcp__coordinator__get_strategy_plan", "mcp__coordinator__get_budget_status",
+        "mcp__coordinator__spawn_swarm", "mcp__coordinator__defer_challenge",
+        "mcp__coordinator__promote_challenge", "mcp__coordinator__set_strategy_mode",
+        "mcp__coordinator__check_swarm_status", "mcp__coordinator__submit_flag",
+        "mcp__coordinator__kill_swarm", "mcp__coordinator__bump_agent",
+        "mcp__coordinator__broadcast",
         "mcp__coordinator__read_solver_trace",
         "ToolSearch",
         "TaskCreate", "TaskUpdate", "TaskGet", "TaskList", "TaskOutput", "TaskStop",

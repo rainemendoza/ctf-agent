@@ -9,24 +9,19 @@ from typing import Any
 
 import httpx
 
+from backend.platform import SubmitResult
+
 logger = logging.getLogger(__name__)
 
 USER_AGENT = "Mozilla/5.0 (Windows NT 6.1; WOW64) AppleWebKit/537.36"
 
 
 @dataclass
-class SubmitResult:
-    status: str  # "correct" | "already_solved" | "incorrect" | "unknown"
-    message: str
-    display: str
-
-
-@dataclass
 class CTFdClient:
-    base_url: str = "http://localhost:8000"
-    token: str = ""
-    username: str = "admin"
-    password: str = "admin"
+    base_url: str = "https://demo.ctfd.io"
+    token: str = "ctfd_b007fecca76741965557a59002e703fb5f55a8643236fd38ea8590c4a934e378"
+    username: str = "rainem"
+    password: str = "pasword"
 
     _client: httpx.AsyncClient | None = field(default=None, repr=False)
     _csrf_token: str = ""

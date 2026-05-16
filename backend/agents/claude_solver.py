@@ -24,10 +24,10 @@ from claude_agent_sdk import (
 )
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec
 from backend.output_types import solver_output_json_schema
+from backend.platform import PlatformClient
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
@@ -44,7 +44,7 @@ class ClaudeSolver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
+        ctfd: PlatformClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,

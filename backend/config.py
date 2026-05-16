@@ -30,4 +30,14 @@ class Settings(BaseSettings):
     max_attempts_per_challenge: int = 3
     container_memory_limit: str = "16g"
 
+    # Strategy
+    strategy_mode: str = "balanced"  # easy_first | points_first | balanced
+    max_challenge_wall_time_s: int = 1800
+    max_no_progress_s: int = 600
+    max_challenge_cost_usd: float = 5.0
+    max_total_cost_usd: float = 100.0
+    max_solver_bumps: int = 3
+    max_wrong_submissions_per_challenge: int = 5
+    retry_deferred_after_s: int = 1800
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}

@@ -10,9 +10,9 @@ from typing import TYPE_CHECKING
 
 from backend.agents.solver import Solver
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.message_bus import ChallengeMessageBus
 from backend.models import DEFAULT_MODELS, provider_from_spec
+from backend.platform import PlatformClient
 from backend.prompts import ChallengeMeta
 from backend.solver_base import (
     CANCELLED,
@@ -49,7 +49,7 @@ class ChallengeSwarm:
 
     challenge_dir: str
     meta: ChallengeMeta
-    ctfd: CTFdClient
+    ctfd: PlatformClient
     cost_tracker: CostTracker
     settings: Settings
     model_specs: list[str] = field(default_factory=lambda: list(DEFAULT_MODELS))
@@ -61,6 +61,9 @@ class ChallengeSwarm:
     findings: dict[str, str] = field(default_factory=dict)
     winner: SolverResult | None = None
     confirmed_flag: str | None = None
+    started_at: float | None = None
+    last_progress_at: float | None = None
+    bump_count: int = 0
     _flag_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _submit_count: dict[str, int] = field(default_factory=dict)  # per-model wrong submission count
     _submitted_flags: set[str] = field(default_factory=set)  # dedup exact flags
@@ -194,6 +197,10 @@ class ChallengeSwarm:
     async def _run_solver(self, model_spec: str) -> SolverResult | None:
         solver = self._create_solver(model_spec)
         self.solvers[model_spec] = solver
+        if self.started_at is None:
+            self.started_at = time.monotonic()
+        if self.last_progress_at is None:
+            self.last_progress_at = self.started_at
 
         try:
             result, final_solver = await self._run_solver_loop(solver, model_spec)
@@ -224,11 +231,13 @@ class ChallengeSwarm:
                     and result.findings_summary
                     and not result.findings_summary.startswith(("Error:", "Turn failed:"))):
                 self.findings[model_spec] = result.findings_summary
+                self.last_progress_at = time.monotonic()
                 await self.message_bus.post(model_spec, result.findings_summary[:500])
 
             if result.status == FLAG_FOUND:
                 self.cancel_event.set()
                 self.winner = result
+                self.last_progress_at = time.monotonic()
                 logger.info(
                     f"[{self.meta.name}] Flag found by {model_spec}: {result.flag}"
                 )
@@ -274,6 +283,7 @@ class ChallengeSwarm:
                     consecutive_errors = 0
 
                 bump_count += 1
+                self.bump_count += 1
                 # Cooldown between bumps — check cancellation during wait
                 try:
                     await asyncio.wait_for(
@@ -337,6 +347,15 @@ class ChallengeSwarm:
             "challenge": self.meta.name,
             "cancelled": self.cancel_event.is_set(),
             "winner": self.winner.flag if self.winner else None,
+            "started_at": self.started_at,
+            "last_progress_at": self.last_progress_at,
+            "bump_count": self.bump_count,
+            "cost_usd": sum(
+                usage.cost_usd
+                for name, usage in self.cost_tracker.by_agent.items()
+                if name.startswith(f"{self.meta.name}/")
+            ),
+            "wrong_submissions": sum(self._submit_count.values()),
             "agents": {
                 spec: {
                     "findings": self.findings.get(spec, ""),

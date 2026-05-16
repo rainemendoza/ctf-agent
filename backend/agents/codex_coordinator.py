@@ -12,10 +12,15 @@ from backend.agents.coordinator_core import (
     do_broadcast,
     do_bump_agent,
     do_check_swarm_status,
+    do_defer_challenge,
     do_fetch_challenges,
+    do_get_budget_status,
     do_get_solve_status,
+    do_get_strategy_plan,
     do_kill_swarm,
+    do_promote_challenge,
     do_read_solver_trace,
+    do_set_strategy_mode,
     do_spawn_swarm,
     do_submit_flag,
 )
@@ -29,22 +34,23 @@ _rpc_counter = itertools.count(1)
 
 COORDINATOR_PROMPT = """\
 You are a CTF competition coordinator running for the ENTIRE duration of a live competition.
-Your job is to maximize the number of challenges solved while minimizing cost.
+Your job is to maximize the number of challenges solved under configured time, cost,
+and concurrency limits.
 
 Strategy:
-- Spawn swarms for unsolved challenges, prioritizing by solve count (easy first)
+- Use the strategy queue as the source of truth for what to spawn next.
+- Spawn swarms for unsolved challenges in ranked order, using solve count, value, category,
+  keywords, and recent progress signals.
 - Use read_solver_trace to monitor what each solver is doing and where it's stuck
 - When agents are stuck, read their traces, then craft targeted bumps with specific technical guidance
 - Use broadcast to share cross-solver insights (e.g. flag format discovery, shared vulnerabilities)
 
 CRITICAL RULES:
-- NEVER kill a swarm. Solvers will keep trying indefinitely with different approaches.
-  Even when stuck, they often unstick themselves after several bumps. Your job is to
-  HELP them, not give up on them. The only time a swarm should die is when the flag
-  is confirmed correct.
+- Stop or defer swarms that exceed configured wall-time, no-progress, wrong-submission,
+  or cost limits.
+- Prefer easy/high-confidence solves first unless strategy_mode says otherwise.
 - When a solver seems stuck, bump it with very specific technical guidance based on
   its trace. Tell it exactly what to try next — specific tools, techniques, approaches.
-- Cost is not a concern. Keep all swarms running.
 
 You will receive event messages. Respond with tool calls to manage the competition.
 """
@@ -61,12 +67,55 @@ COORDINATOR_TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "get_strategy_plan",
+        "description": "Show the ranked challenge queue with scoring reasons.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "get_budget_status",
+        "description": "Show per-challenge progress, cost, and stop-policy state.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "spawn_swarm",
-        "description": "Launch all solver models on a challenge.",
+        "description": "Launch solver models on a challenge using the current strategy tier.",
         "inputSchema": {
             "type": "object",
             "properties": {"challenge_name": {"type": "string"}},
             "required": ["challenge_name"],
+        },
+    },
+    {
+        "name": "defer_challenge",
+        "description": "Pause a challenge with a reason and retry window.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "challenge_name": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["challenge_name", "reason"],
+        },
+    },
+    {
+        "name": "promote_challenge",
+        "description": "Boost the priority of a challenge.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "challenge_name": {"type": "string"},
+                "bonus": {"type": "number", "default": 25.0},
+            },
+            "required": ["challenge_name"],
+        },
+    },
+    {
+        "name": "set_strategy_mode",
+        "description": "Switch the coordinator strategy mode.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"strategy_mode": {"type": "string"}},
+            "required": ["strategy_mode"],
         },
     },
     {
@@ -80,7 +129,7 @@ COORDINATOR_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Submit a flag to CTFd.",
+        "description": "Submit a flag to the configured CTF platform.",
         "inputSchema": {
             "type": "object",
             "properties": {"challenge_name": {"type": "string"}, "flag": {"type": "string"}},
@@ -199,12 +248,22 @@ class CodexCoordinator:
         if self._reader_task:
             self._reader_task.cancel()
         if self._proc:
-            try:
-                self._proc.terminate()
-                await asyncio.wait_for(self._proc.wait(), timeout=5)
-            except Exception:
-                self._proc.kill()
+            proc = self._proc
             self._proc = None
+            try:
+                if proc.returncode is None:
+                    try:
+                        proc.terminate()
+                        await asyncio.wait_for(proc.wait(), timeout=5)
+                    except ProcessLookupError:
+                        pass
+                    except Exception:
+                        try:
+                            proc.kill()
+                        except ProcessLookupError:
+                            pass
+            finally:
+                self._proc = None
 
     # --- JSON-RPC transport ---
 
@@ -304,8 +363,18 @@ class CodexCoordinator:
             return await do_fetch_challenges(deps)
         elif name == "get_solve_status":
             return await do_get_solve_status(deps)
+        elif name == "get_strategy_plan":
+            return await do_get_strategy_plan(deps)
+        elif name == "get_budget_status":
+            return await do_get_budget_status(deps)
         elif name == "spawn_swarm":
             return await do_spawn_swarm(deps, args["challenge_name"])
+        elif name == "defer_challenge":
+            return await do_defer_challenge(deps, args["challenge_name"], args["reason"])
+        elif name == "promote_challenge":
+            return await do_promote_challenge(deps, args["challenge_name"], args.get("bonus", 25.0))
+        elif name == "set_strategy_mode":
+            return await do_set_strategy_mode(deps, args["strategy_mode"])
         elif name == "check_swarm_status":
             return await do_check_swarm_status(deps, args["challenge_name"])
         elif name == "submit_flag":

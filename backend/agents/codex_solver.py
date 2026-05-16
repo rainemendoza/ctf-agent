@@ -21,10 +21,10 @@ import time
 from typing import Any
 
 from backend.cost_tracker import CostTracker
-from backend.ctfd import CTFdClient
 from backend.loop_detect import LoopDetector
 from backend.models import model_id_from_spec, supports_vision
 from backend.output_types import solver_output_json_schema
+from backend.platform import PlatformClient
 from backend.prompts import ChallengeMeta, build_prompt, list_distfiles
 from backend.sandbox import DockerSandbox
 from backend.solver_base import CANCELLED, ERROR, FLAG_FOUND, GAVE_UP, QUOTA_ERROR, SolverResult
@@ -85,7 +85,7 @@ SANDBOX_TOOLS = [
     },
     {
         "name": "submit_flag",
-        "description": "Submit a flag to CTFd. Returns CORRECT, ALREADY SOLVED, or INCORRECT.",
+        "description": "Submit a flag to the configured CTF platform. Returns CORRECT, ALREADY SOLVED, or INCORRECT.",
         "inputSchema": {"type": "object", "properties": {"flag": {"type": "string"}}, "required": ["flag"]},
     },
     {
@@ -124,7 +124,7 @@ class CodexSolver:
         model_spec: str,
         challenge_dir: str,
         meta: ChallengeMeta,
-        ctfd: CTFdClient,
+        ctfd: PlatformClient,
         cost_tracker: CostTracker,
         settings: object,
         cancel_event: asyncio.Event | None = None,
@@ -215,7 +215,6 @@ class CodexSolver:
             "cwd": "/challenge",
             "approvalPolicy": "on-request",
             "sandbox": "read-only",
-            "serviceTier": "flex",
             "dynamicTools": SANDBOX_TOOLS,
         }
         # Reasoning effort for models that support it

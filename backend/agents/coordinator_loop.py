@@ -14,8 +14,15 @@ from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.deps import CoordinatorDeps
 from backend.models import DEFAULT_MODELS
-from backend.poller import CTFdPoller
+from backend.platform import PlatformClient
+from backend.poller import PlatformPoller
 from backend.prompts import ChallengeMeta
+from backend.strategy import (
+    ChallengeState,
+    rank_challenges,
+    select_model_specs,
+    should_stop_challenge,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,8 +37,8 @@ def build_deps(
     no_submit: bool = False,
     challenge_dirs: dict[str, str] | None = None,
     challenge_metas: dict[str, ChallengeMeta] | None = None,
-) -> tuple[CTFdClient, CostTracker, CoordinatorDeps]:
-    """Create CTFd client, cost tracker, and coordinator deps."""
+) -> tuple[PlatformClient, CostTracker, CoordinatorDeps]:
+    """Create platform client, cost tracker, and coordinator deps."""
     ctfd = CTFdClient(
         base_url=settings.ctfd_url,
         token=settings.ctfd_token,
@@ -68,7 +75,7 @@ def build_deps(
 
 async def run_event_loop(
     deps: CoordinatorDeps,
-    ctfd: CTFdClient,
+    ctfd: PlatformClient,
     cost_tracker: CostTracker,
     turn_fn: TurnFn,
     status_interval: int = 60,
@@ -77,12 +84,12 @@ async def run_event_loop(
 
     Args:
         deps: Coordinator dependencies (shared state).
-        ctfd: CTFd client (for poller).
+        ctfd: Platform client (for poller).
         cost_tracker: Cost tracker.
         turn_fn: Async function that sends a message to the coordinator LLM.
         status_interval: Seconds between status updates.
     """
-    poller = CTFdPoller(ctfd=ctfd, interval_s=5.0)
+    poller = PlatformPoller(platform=ctfd, interval_s=5.0)
     await poller.start()
 
     # Start operator message HTTP endpoint
@@ -100,14 +107,15 @@ async def run_event_loop(
         f"CTF is LIVE. {len(poller.known_challenges)} challenges, "
         f"{len(poller.known_solved)} solved.\n"
         f"Unsolved: {sorted(unsolved) if unsolved else 'NONE'}\n"
-        "Fetch challenges and spawn swarms for all unsolved."
+        f"Strategy mode: {getattr(deps.settings, 'strategy_mode', 'balanced')}\n"
+        "Fetch challenges and use the strategy queue to spawn the highest-priority unsolved swarms."
     )
 
     try:
         await turn_fn(initial_msg)
 
         # Auto-spawn swarms for unsolved challenges if coordinator LLM didn't
-        await _auto_spawn_unsolved(deps, poller)
+        await _backfill_with_strategy(deps, poller)
 
         last_status = asyncio.get_event_loop().time()
 
@@ -125,13 +133,16 @@ async def run_event_loop(
                     if not swarm.cancel_event.is_set():
                         swarm.kill()
                         logger.info("Auto-killed swarm for: %s", evt.challenge_name)
+                    state = deps.challenge_states.get(evt.challenge_name)
+                    if state:
+                        state.status = "solved"
 
             parts: list[str] = []
             for evt in events:
                 if evt.kind == "new_challenge":
                     parts.append(f"NEW CHALLENGE: '{evt.challenge_name}' appeared. Spawn a swarm.")
-                    # Auto-spawn for new challenges
-                    await _auto_spawn_one(deps, evt.challenge_name)
+                    # Refresh the ranked queue and backfill if there is capacity.
+                    await _backfill_with_strategy(deps, poller)
                 elif evt.kind == "challenge_solved":
                     parts.append(f"SOLVED: '{evt.challenge_name}' — swarm auto-killed.")
 
@@ -140,6 +151,35 @@ async def run_event_loop(
                 if task.done():
                     parts.append(f"SOLVER FINISHED: Swarm for '{name}' completed. Check results or retry.")
                     deps.swarm_tasks.pop(name, None)
+
+            # Sync runtime metrics into coordinator state and enforce stop rules.
+            if deps.swarms:
+                for name, swarm in deps.swarms.items():
+                    state = deps.challenge_states.setdefault(name, ChallengeState())
+                    status = swarm.get_status()
+                    state.cost_usd = float(status.get("cost_usd", state.cost_usd))
+                    state.wrong_submissions = int(status.get("wrong_submissions", state.wrong_submissions))
+                    state.bump_count = int(status.get("bump_count", state.bump_count))
+                    state.started_at = status.get("started_at", state.started_at)
+                    state.last_progress_at = status.get("last_progress_at", state.last_progress_at)
+                    state.status = "solved" if status.get("winner") else ("running" if not status.get("cancelled") else "deferred")
+
+                    should_stop, reason = should_stop_challenge(state, deps.settings, now=asyncio.get_event_loop().time())
+                    if should_stop and state.status == "running":
+                        swarm.kill()
+                        state.status = "deferred"
+                        state.deferred_until = asyncio.get_event_loop().time() + getattr(deps.settings, "retry_deferred_after_s", 1800)
+                        logger.info("Stopping %s: %s", name, reason)
+
+            if deps.cost_tracker.total_cost_usd >= getattr(deps.settings, "max_total_cost_usd", 100.0):
+                logger.warning(
+                    "Global budget reached: $%.2f >= $%.2f",
+                    deps.cost_tracker.total_cost_usd,
+                    getattr(deps.settings, "max_total_cost_usd", 100.0),
+                )
+                break
+
+            await _backfill_with_strategy(deps, poller)
 
             # Drain solver-to-coordinator messages
             while True:
@@ -208,7 +248,11 @@ async def run_event_loop(
     }
 
 
-async def _auto_spawn_one(deps: CoordinatorDeps, challenge_name: str) -> None:
+async def _auto_spawn_one(
+    deps: CoordinatorDeps,
+    challenge_name: str,
+    model_specs: list[str] | None = None,
+) -> None:
     """Auto-spawn a swarm for a single challenge if not already running."""
     if challenge_name in deps.swarms:
         return
@@ -217,17 +261,45 @@ async def _auto_spawn_one(deps: CoordinatorDeps, challenge_name: str) -> None:
         return
     try:
         from backend.agents.coordinator_core import do_spawn_swarm
-        result = await do_spawn_swarm(deps, challenge_name)
+        result = await do_spawn_swarm(deps, challenge_name, model_specs=model_specs)
         logger.info(f"Auto-spawn {challenge_name}: {result[:100]}")
     except Exception as e:
         logger.warning(f"Auto-spawn failed for {challenge_name}: {e}")
 
 
-async def _auto_spawn_unsolved(deps: CoordinatorDeps, poller) -> None:
-    """Auto-spawn swarms for all unsolved challenges that don't have active swarms."""
-    unsolved = poller.known_challenges - poller.known_solved
-    for name in sorted(unsolved):
-        await _auto_spawn_one(deps, name)
+async def _backfill_with_strategy(deps: CoordinatorDeps, poller) -> None:
+    """Rank unsolved challenges and backfill available capacity from the top of the queue."""
+    active = sum(1 for t in deps.swarm_tasks.values() if not t.done())
+    capacity = max(0, deps.max_concurrent_challenges - active)
+    if capacity <= 0:
+        return
+
+    try:
+        challenges = await deps.ctfd.fetch_all_challenges()
+    except Exception as e:
+        logger.warning("Strategy backfill skipped: could not fetch challenges (%s)", e)
+        return
+
+    solved = set(poller.known_solved)
+    unsolved = [ch for ch in challenges if ch.get("name") not in solved]
+    try:
+        ranked = rank_challenges(unsolved, deps.challenge_states, getattr(deps.settings, "strategy_mode", "balanced"))
+    except Exception as e:
+        logger.warning("Strategy backfill skipped: could not rank challenges (%s)", e)
+        return
+    deps.challenge_queue = ranked
+
+    for candidate in ranked:
+        if capacity <= 0:
+            break
+        state = deps.challenge_states.get(candidate.name)
+        if state and state.deferred_until and state.deferred_until > asyncio.get_event_loop().time():
+            continue
+        if candidate.name in deps.swarms:
+            continue
+        candidate.model_specs = select_model_specs(getattr(deps.settings, "strategy_mode", "balanced"), candidate.score, deps.model_specs)
+        await _auto_spawn_one(deps, candidate.name, model_specs=candidate.model_specs)
+        capacity -= 1
 
 
 async def _start_msg_server(inbox: asyncio.Queue, port: int = 0) -> asyncio.Server | None:
