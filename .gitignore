@@ -6,6 +6,7 @@ creds.json
 logs/
 *.log
 *.jsonl
+docs/
 
 # Challenge data (downloaded at runtime)
 challenges*/
