@@ -15,6 +15,7 @@ dependencies = [
     "rich",
     "click",
     "markdownify",
+    "mcp",
 ]
 
 [project.scripts]

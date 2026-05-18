@@ -6,11 +6,19 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
+    # Which platform backend to use: "ctfd" or "htb"
+    platform: str = "ctfd"
+
     # CTFd
     ctfd_url: str = "http://localhost:8000"
     ctfd_user: str = "admin"
     ctfd_pass: str = "admin"
     ctfd_token: str = ""
+
+    # Hack The Box (uses HTB's official MCP server)
+    htb_mcp_url: str = "https://mcp.hackthebox.ai/v1/ctf/mcp/"
+    htb_token: str = ""
+    htb_event_id: str = ""
 
     # API Keys
     anthropic_api_key: str = ""

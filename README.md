@@ -17,10 +17,10 @@ The agent solves challenges across all categories — pwn, rev, crypto, forensic
 A **coordinator** LLM manages the competition while **solver swarms** attack individual challenges. Each swarm runs multiple models simultaneously — the first to find the flag wins.
 
 ```
-                        +-----------------+
-                        |  CTFd Platform  |
-                        +--------+--------+
-                                 |
+                  +---------------------------+
+                  |  Platform (CTFd | HTB MCP)|
+                  +-------------+-------------+
+                                |
                         +--------v--------+
                         |  Poller (5s)    |
                         +--------+--------+
@@ -74,7 +74,26 @@ uv run ctf-solve --coordinator codex \
   --challenges-dir challenges \
   --max-challenges 3 \
   -v
+
+# Or run against a Hack The Box CTF event via HTB's official MCP server
+uv run ctf-solve --coordinator codex \
+  --platform htb \
+  --htb-token "$HTB_TOKEN" \
+  --htb-event-id 1234 \
+  --challenges-dir challenges \
+  --max-challenges 3 \
+  -v
 ```
+
+### Hack The Box backend
+
+The HTB backend talks to HTB's official MCP server at
+`https://mcp.hackthebox.ai/v1/ctf/mcp/` over streamable HTTP. Generate a token
+from **Profile Settings -> MCP Access** on hackthebox.com (one-time viewable).
+Set the event id of the CTF you want to attack with `--htb-event-id` or
+`HTB_EVENT_ID`. All challenge listing, attachment downloads, container start/stop,
+and flag submission flow through MCP tools (`get_ctf_details`, `get_download_link`,
+`submit_flag`, `start_container`, `get_team_solves`, ...).
 
 uv run ctf-solve --coordinator codex \
   --challenges-dir challenges \

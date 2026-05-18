@@ -13,6 +13,7 @@ from backend.config import Settings
 from backend.cost_tracker import CostTracker
 from backend.ctfd import CTFdClient
 from backend.deps import CoordinatorDeps
+from backend.htb import HTBClient
 from backend.models import DEFAULT_MODELS
 from backend.platform import PlatformClient
 from backend.poller import PlatformPoller
@@ -30,6 +31,29 @@ logger = logging.getLogger(__name__)
 TurnFn = Callable[[str], Coroutine[Any, Any, None]]
 
 
+def _build_platform_client(settings: Settings) -> PlatformClient:
+    """Pick the platform backend based on settings.platform."""
+    platform = (getattr(settings, "platform", "ctfd") or "ctfd").lower()
+    if platform == "htb":
+        event_id: int | str | None = None
+        raw_event = getattr(settings, "htb_event_id", "") or ""
+        if raw_event:
+            event_id = int(raw_event) if str(raw_event).isdigit() else raw_event
+        return HTBClient(
+            token=settings.htb_token,
+            mcp_url=settings.htb_mcp_url,
+            event_id=event_id,
+        )
+    if platform == "ctfd":
+        return CTFdClient(
+            base_url=settings.ctfd_url,
+            token=settings.ctfd_token,
+            username=settings.ctfd_user,
+            password=settings.ctfd_pass,
+        )
+    raise ValueError(f"Unknown platform: {platform!r} (expected 'ctfd' or 'htb')")
+
+
 def build_deps(
     settings: Settings,
     model_specs: list[str] | None = None,
@@ -39,12 +63,7 @@ def build_deps(
     challenge_metas: dict[str, ChallengeMeta] | None = None,
 ) -> tuple[PlatformClient, CostTracker, CoordinatorDeps]:
     """Create platform client, cost tracker, and coordinator deps."""
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+    ctfd = _build_platform_client(settings)
     cost_tracker = CostTracker()
     specs = model_specs or list(DEFAULT_MODELS)
     Path(challenges_root).mkdir(parents=True, exist_ok=True)

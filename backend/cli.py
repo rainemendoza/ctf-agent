@@ -29,8 +29,18 @@ def _setup_logging(verbose: bool = False) -> None:
 
 
 @click.command()
+@click.option(
+    "--platform",
+    "platform_backend",
+    default=None,
+    type=click.Choice(["ctfd", "htb"]),
+    help="Platform backend (default: ctfd, or PLATFORM env var)",
+)
 @click.option("--ctfd-url", default=None, help="CTFd URL (overrides .env)")
 @click.option("--ctfd-token", default=None, help="CTFd API token (overrides .env)")
+@click.option("--htb-token", default=None, help="HTB MCP API token (overrides .env)")
+@click.option("--htb-mcp-url", default=None, help="HTB MCP server URL (overrides .env)")
+@click.option("--htb-event-id", default=None, help="HTB CTF event id to operate on")
 @click.option("--image", default="ctf-sandbox", help="Docker sandbox image name")
 @click.option("--models", multiple=True, help="Model specs (default: all configured)")
 @click.option("--challenge", default=None, help="Solve a single challenge directory")
@@ -42,8 +52,12 @@ def _setup_logging(verbose: bool = False) -> None:
 @click.option("--msg-port", default=0, type=int, help="Operator message port (0 = auto)")
 @click.option("-v", "--verbose", is_flag=True, help="Verbose logging")
 def main(
+    platform_backend: str | None,
     ctfd_url: str | None,
     ctfd_token: str | None,
+    htb_token: str | None,
+    htb_mcp_url: str | None,
+    htb_event_id: str | None,
     image: str,
     models: tuple[str, ...],
     challenge: str | None,
@@ -62,16 +76,27 @@ def main(
     _setup_logging(verbose)
 
     settings = Settings(sandbox_image=image)
+    if platform_backend:
+        settings.platform = platform_backend
     if ctfd_url:
         settings.ctfd_url = ctfd_url
     if ctfd_token:
         settings.ctfd_token = ctfd_token
+    if htb_token:
+        settings.htb_token = htb_token
+    if htb_mcp_url:
+        settings.htb_mcp_url = htb_mcp_url
+    if htb_event_id:
+        settings.htb_event_id = htb_event_id
     settings.max_concurrent_challenges = max_challenges
 
     model_specs = list(models) if models else list(DEFAULT_MODELS)
 
     console.print("[bold]CTF Agent v2[/bold]")
-    console.print(f"  CTFd: {settings.ctfd_url}")
+    if settings.platform == "htb":
+        console.print(f"  Platform: HTB  MCP: {settings.htb_mcp_url}  Event: {settings.htb_event_id or '<unset>'}")
+    else:
+        console.print(f"  Platform: CTFd  URL: {settings.ctfd_url}")
     console.print(f"  Models: {', '.join(model_specs)}")
     console.print(f"  Image: {settings.sandbox_image}")
     console.print(f"  Max challenges: {max_challenges}")
@@ -91,9 +116,9 @@ async def _run_single(
     max_challenges: int,
 ) -> None:
     """Run a single challenge with a swarm."""
+    from backend.agents.coordinator_loop import _build_platform_client
     from backend.agents.swarm import ChallengeSwarm
     from backend.cost_tracker import CostTracker
-    from backend.ctfd import CTFdClient
     from backend.prompts import ChallengeMeta
     from backend.sandbox import cleanup_orphan_containers, configure_semaphore
 
@@ -110,12 +135,7 @@ async def _run_single(
     meta = ChallengeMeta.from_yaml(meta_path)
     console.print(f"[bold]Challenge:[/bold] {meta.name} ({meta.category}, {meta.value} pts)")
 
-    ctfd = CTFdClient(
-        base_url=settings.ctfd_url,
-        token=settings.ctfd_token,
-        username=settings.ctfd_user,
-        password=settings.ctfd_pass,
-    )
+    ctfd = _build_platform_client(settings)
     cost_tracker = CostTracker()
 
     swarm = ChallengeSwarm(
